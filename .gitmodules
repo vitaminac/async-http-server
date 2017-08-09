@@ -2,3 +2,7 @@
 	path = flask
 	url = https://github.com/vitaminac/flask.git
 	branch = nodoc
+[submodule "werkzeug"]
+	path = werkzeug
+	url = https://github.com/vitaminac/werkzeug.git
+	branch = nodoc

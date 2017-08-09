@@ -31,14 +31,14 @@ class Response:
 
     header_template = Template('''$header_field: $value''')
 
-    def __init__ (self, status_code: int, body = "", headers: dict = None, encoding: str = "utf-8"):
+    def __init__ (self, status_code: int, body = "", headers: dict = None, encoding: str = "utf-8", mimetype: str = "text/plain", protocol_version: float = 1.1):
         # cant set headers to default argument's value
         if not headers:
             headers = { }
         self.raw_data = Body(body, encoding=encoding)
         self.headers = {
             "Content-Type"  : Response.content_type_template.safe_substitute({
-                "type"    : "text/plain",
+                "type"    : mimetype,
                 "encoding": encoding
             }),
             # The length of the request body in octets (8-bit bytes).
@@ -48,7 +48,7 @@ class Response:
         }
         self.headers.update(headers)
         self.http_args = {
-            "http_protocol_version": "1.1",
+            "http_protocol_version": str(protocol_version),
             "code"                 : "404",
             "status"               : codes["404"],
             "headers"              : self.generate_headers(self.headers)
