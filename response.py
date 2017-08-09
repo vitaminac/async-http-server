@@ -11,17 +11,27 @@ class Body:
         if isinstance(body, str):
             self.encoding = kwargs["encoding"]
             body = body.encode(self.encoding)
+            self.length = len(body)
             self.io_raw_stream = io.BytesIO(body)
+        elif isinstance(body, io.FileIO):
+            self.io_raw_stream = body
+            current_position = self.io_raw_stream.tell()
+            self.io_raw_stream.seek(0, io.SEEK_END)
+            self.length = self.io_raw_stream.tell()
+            self.io_raw_stream.seek(current_position, io.SEEK_SET)
 
     def __len__ (self):
-        current_position = self.io_raw_stream.tell()
-        self.io_raw_stream.seek(0, io.SEEK_END)
-        length = self.io_raw_stream.tell()
-        self.io_raw_stream.seek(current_position, io.SEEK_SET)
-        return length
+        return self.length
 
     def __iter__ (self):
-        return self.io_raw_stream
+        return self
+
+    def __next__ (self):
+        bytes = self.io_raw_stream.read(2048)
+        if bytes:
+            return bytes
+        else:
+            raise StopIteration
 
 
 class Response:
@@ -35,22 +45,22 @@ class Response:
         # cant set headers to default argument's value
         if not headers:
             headers = { }
-        self.raw_data = Body(body, encoding=encoding)
+        self.body = Body(body, encoding=encoding)
         self.headers = {
             "Content-Type"  : Response.content_type_template.safe_substitute({
                 "type"    : mimetype,
                 "encoding": encoding
             }),
             # The length of the request body in octets (8-bit bytes).
-            "Content-Length": str(len(self.raw_data)),
+            "Content-Length": str(len(self.body)),
             "Date"          : formatdate(timeval=None, localtime=False, usegmt=True),
             "Server"        : "socket server"
         }
         self.headers.update(headers)
         self.http_args = {
             "http_protocol_version": str(protocol_version),
-            "code"                 : "404",
-            "status"               : codes["404"],
+            "code"                 : status_code,
+            "status"               : codes[status_code],
             "headers"              : self.generate_headers(self.headers)
         }
         self.http_head = Response.response_http_header_template.safe_substitute(self.http_args)
@@ -67,14 +77,13 @@ class Response:
     def __repr__ (self) -> str:
         return self.__str__()
 
-    def toBytes (self):
-        return self.__str__().encode("ascii")
-
     def __iter__ (self):
-        return self
-
-    def __next__ (self):
-        return self.http_head
+        return self.iter(self.http_head, self.body)
 
     def __call__ (self, *args, **kwargs):
-        return self.http_head
+        return self.__iter__()
+
+    def iter (self, head, body):
+        yield head.encode("ascii")
+        for chunk in body:
+            yield chunk
