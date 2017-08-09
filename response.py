@@ -60,7 +60,7 @@ class Response:
         self.http_args = {
             "http_protocol_version": str(protocol_version),
             "code"                 : status_code,
-            "status"               : codes[status_code],
+            "status"               : codes[str(status_code)],
             "headers"              : self.generate_headers(self.headers)
         }
         self.http_head = Response.response_http_header_template.safe_substitute(self.http_args)
@@ -87,3 +87,4 @@ class Response:
         yield head.encode("ascii")
         for chunk in body:
             yield chunk
+        raise StopIteration
