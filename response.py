@@ -31,6 +31,8 @@ class Body:
         if bytes:
             return bytes
         else:
+            self.io_raw_stream.close()
+            del self.io_raw_stream
             raise StopIteration
 
 
@@ -47,13 +49,16 @@ class Response:
             headers = { }
         self.body = Body(body, encoding=encoding)
         self.headers = {
+            # If a Content-Type header field is not present, the recipient MAY either assume a media type of application/octet-stream (RFC2046, Section 4.5.1) or examine the data to determine its type
             "Content-Type"  : Response.content_type_template.safe_substitute({
                 "type"    : mimetype,
                 "encoding": encoding
             }),
             # The length of the request body in octets (8-bit bytes).
             "Content-Length": str(len(self.body)),
+            # The date and time that the message was sent (in "HTTP-date" format as defined by RFC 7231
             "Date"          : formatdate(timeval=None, localtime=False, usegmt=True),
+            # A name for the server
             "Server"        : "socket server"
         }
         self.headers.update(headers)
@@ -87,4 +92,3 @@ class Response:
         yield head.encode("ascii")
         for chunk in body:
             yield chunk
-        raise StopIteration
