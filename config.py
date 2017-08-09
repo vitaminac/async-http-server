@@ -2,7 +2,8 @@
 
 loopback = "0.0.0.0"
 
-config = {
-    "host": loopback,
-    "port": 4682
-}
+
+class Config:
+    host = loopback
+    port = 48539
+    message = "Hello, World!"
