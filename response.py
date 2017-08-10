@@ -2,6 +2,7 @@
 import io
 from email.utils import formatdate
 from string import Template
+from typing import Callable, List, Tuple, Any
 
 from status_codes import codes
 
@@ -37,13 +38,16 @@ class Body:
 
 
 class Response:
-    response_http_header_template = Template('''HTTP/$http_protocol_version $code $status\n$headers\n\n''')
+    response_http_header_template = Template('''HTTP/$http_protocol_version $status\n$headers\n\n''')
+
+    status_template = Template('''$code $status''')
 
     content_type_template = Template('''$type; charset=$encoding''')
 
     header_template = Template('''$header_field: $value''')
 
-    def __init__ (self, status_code: int, body = "", headers: dict = None, encoding: str = "utf-8", mimetype: str = "text/plain", protocol_version: float = 1.1):
+    def __init__ (self, status_code: int, body = "", headers: dict = None, encoding: str = "utf-8", mimetype: str = "text/plain", protocol_version: float = 1.1,
+                  start_response: Callable[[str, List[Tuple[str, str]], Any], Callable[[bytes], Any]] = None):
         # cant set headers to default argument's value
         if not headers:
             headers = { }
@@ -64,11 +68,15 @@ class Response:
         self.headers.update(headers)
         self.http_args = {
             "http_protocol_version": str(protocol_version),
-            "code"                 : status_code,
-            "status"               : codes[str(status_code)],
+            "status"               : self.status_template.safe_substitute({
+                "code"  : status_code,
+                "status": codes[str(status_code)]
+            }),
             "headers"              : self.generate_headers(self.headers)
         }
-        self.http_head = Response.response_http_header_template.safe_substitute(self.http_args)
+        self.http_head = Response.response_http_header_template.safe_substitute(self.http_args).encode("ascii")
+        if start_response:
+            start_response(self.http_args["status"])
 
     def generate_headers (self, headers: dict):
         return "\n".join([Response.header_template.safe_substitute({
@@ -89,6 +97,6 @@ class Response:
         return self.__iter__()
 
     def iter (self, head, body):
-        yield head.encode("ascii")
+        yield head
         for chunk in body:
             yield chunk
