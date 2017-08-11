@@ -47,7 +47,7 @@ class Response:
     header_template = Template('''$header_field: $value''')
 
     def __init__ (self, status_code: int, body = "", headers: dict = None, encoding: str = "utf-8", mimetype: str = "text/plain", protocol_version: float = 1.1,
-                  start_response: Callable[[str, List[Tuple[str, str]], Any], Callable[[bytes], Any]] = None):
+                  start_response: Callable[[str, List[Tuple[str, str]], Any], Callable[[bytes], Any]] = None, conn_close = True):
         # cant set headers to default argument's value
         if not headers:
             headers = { }
@@ -63,7 +63,8 @@ class Response:
             # The date and time that the message was sent (in "HTTP-date" format as defined by RFC 7231
             "Date"          : formatdate(timeval=None, localtime=False, usegmt=True),
             # A name for the server
-            "Server"        : "socket server"
+            "Server"        : "socket server",
+            "Connection"    : "close" if conn_close else "keep-alive"
         }
         self.headers.update(headers)
         self.http_args = {

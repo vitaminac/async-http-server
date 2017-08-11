@@ -3,7 +3,7 @@
 import socket
 import threading
 
-from qsonac.wsgi import WSGIRequestHandle
+from qsonac.handler import WSGIRequestHandle
 
 
 class Server:
@@ -37,7 +37,7 @@ class Server:
             worker = WSGIRequestHandle(args=(client_socket, address, self.app))
             worker.start()
             # worker.daemon = True
-            worker.join()
+            # worker.join()
             print("current thread list : length:", len(threading.enumerate()), threading.enumerate())
 
 
