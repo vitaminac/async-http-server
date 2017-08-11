@@ -2,9 +2,9 @@
 import io
 from email.utils import formatdate
 from string import Template
-from typing import Callable, List, Tuple, Any
+from typing import Any, Callable, List, Tuple
 
-from status_codes import codes
+from qsonac.status_codes import codes
 
 
 class Body:

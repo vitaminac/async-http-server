@@ -1,7 +1,7 @@
 # coding=utf-8
-from response import Response
-from request import Request
-from urlmap import URLMap
+from qsonac.request import Request
+from qsonac.response import Response
+from qsonac.urlmap import URLMap
 
 
 class Application:

@@ -1,7 +1,7 @@
 # coding=utf-8
-from sockethttpserver import serve
-from application import Application
 from config import Config
+from qsonac.application import Application
+from qsonac.server import serve
 
 app = Application()
 

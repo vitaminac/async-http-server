@@ -1,8 +1,9 @@
 # coding=utf-8
-import unittest
-import response
-from config import Config
 import re
+import unittest
+
+from config import Config
+from qsonac import response
 
 
 class TestResponse(unittest.TestCase):
@@ -14,5 +15,4 @@ class TestResponse(unittest.TestCase):
             resp += chunk
             print(chunk.decode("utf-8"))
         resp = resp.decode("utf-8")
-        print(resp)
         self.assertTrue(TestResponse.pattern.match(resp))
