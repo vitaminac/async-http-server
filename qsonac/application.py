@@ -5,6 +5,9 @@ from qsonac.urlmap import URLMap
 
 
 class Application:
+    Request_class = Request
+    Response_class = Response
+
     def __init__ (self):
         self.rules = URLMap()
 
@@ -23,7 +26,7 @@ class Application:
         return self.make_response(*rv)
 
     def make_response (self, code, rv):
-        return Response(code, rv)
+        return self.Response_class(code, rv)
 
     def add_routing (self, rule, handle):
         self.rules.add_rule(rule, handle)
@@ -39,4 +42,7 @@ class Application:
         return 404, "not found"
 
     def make_request (self, environ):
-        return Request(environ=environ)
+        return self.Request_class(environ=environ)
+
+    def send_static_file (self, file):
+        return open(file, "rb")

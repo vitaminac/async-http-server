@@ -12,9 +12,8 @@ class Body:
         if isinstance(body, str):
             self.encoding = kwargs["encoding"]
             body = body.encode(self.encoding)
-            self.length = len(body)
-            self.io_raw_stream = io.BytesIO(body)
-        elif isinstance(body, io.FileIO):
+            body = io.BytesIO(body)
+        if isinstance(body, io.IOBase):
             self.io_raw_stream = body
             current_position = self.io_raw_stream.tell()
             self.io_raw_stream.seek(0, io.SEEK_END)

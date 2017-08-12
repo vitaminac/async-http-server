@@ -5,7 +5,6 @@ from collections import MutableMapping
 
 
 class TreeMap(MutableMapping):
-    # a restrict TreeMap, for URLMapping
     # create a restrict TreeMap and store compatible key, value pair inside Tree
     # how is compatible is abstracted, that should be defined in each subclass
     # I mean, if we defined a new key, value is compatible with TreeMao T when key is start with T' root key, or vice versa
@@ -28,7 +27,9 @@ class TreeMap(MutableMapping):
     # it will return the root of lowest subtree that { key in subtree } will compute to true, repeat: it's not a exact search
 
     # tree[key] = value, if key is compatible with this tree and key in subtree[key] with < exact search >!! return true,
-    # then replace it root value with new value, if not found create new node of key, value pair
+    # then replace it root value with new value,
+    # if not found create new node of key, value pair, and reconstruct tree according to its new subtree,
+    # maybe some children of current tree can be merge into newly created subtree
     # if key is compatible but can be contained in tree,
     # it mean than new key should be new root and current root should be his child
     # otherwise raise a KeyError exception
@@ -157,6 +158,9 @@ class TreeMap(MutableMapping):
     def __len__ (self):
         return self.length
 
+    def __hash__ (self):
+        return hash(self.root.key)
+
     def __delitem__ (self, key):
         if key:  # check if key is not "", that will be default root of tree
             tree = self._find(key)
@@ -195,6 +199,7 @@ class TreeMap(MutableMapping):
 
 
 class URLMap(TreeMap):
+    # a restrict TreeMap, for URLMapping
     def __init__ (self, root_key: str = "/", value: Callable = None, parent = None):
         super(self.__class__, self).__init__(root_key, value, parent)
 
