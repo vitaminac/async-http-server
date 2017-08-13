@@ -2,107 +2,127 @@
 
 import socket
 import threading
-from functools import partial
-from threading import Thread
-
+from selectors import EVENT_READ, SelectSelector
+from time import sleep
 from qsonac.handler import makeWSGIhandler
 
 
 class HTTPServer:
     # make it in class level, so can be accessed from class method, handle_one_request
     RequestHandlerClass = None
+    address_family = socket.AF_INET
+    socket_type = socket.SOCK_STREAM
+    daemon_threads = True
 
-    def __init__ (self, RequestHandlerClass, client_address = ("127.0.0.1", 80), request_queue_size = 5):
+    def __init__(self, requestHandlerClass, client_address = ("127.0.0.1", 80), request_queue_size = 5):
         self.request_queue_size = request_queue_size
-        self.__class__.RequestHandlerClass = RequestHandlerClass
+        self.__class__.RequestHandlerClass = requestHandlerClass
         self.host, self.port = client_address
         # create and INET STREAMing socket
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket = socket.socket(self.address_family, self.socket_type)
+        self.__shutdown_request = False
 
-    def __enter__ (self):
+    def __enter__(self):
+        self.server_bind()
+        self.server_activate()
+        return self
+
+    def server_bind(self):
         self.server_socket.bind((self.host, self.port))
+
+    def server_activate(self):
         # become a server socket
         # maximum number of queued connections
         self.server_socket.listen(self.request_queue_size)
-        return self
+        print("listening on ", "http://" + self.host + ":" + str(self.port))
 
-    def __exit__ (self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.server_socket.close()
 
-    def serve_forever (self):
+    def serve_forever(self, poll_interval = 0.5):
         """ Main loop awaiting connections """
-        while True:
-            try:
-                self.handle_request()
-            except Exception as e:
-                print(e)
+        with SelectSelector() as selector:
+            selector.register(self, EVENT_READ)
+            while not self.__shutdown_request:
+                ready = selector.select(poll_interval)
+                if ready:
+                    try:
+                        self.handle_request()
+                    except Exception as e:
+                        print(e)
 
-    def get_request (self):
-        print("Awaiting New connection")
+                self.service_actions()
+
+    def service_actions(self):
+        sleep(0.5)
+
+    def get_request(self):
         # conn - socket to client
         # addr - clients address
-        client_socket, address = self.server_socket.accept()
-        return client_socket, address
+        client_socket, client_address = self.server_socket.accept()
+        print("Got connection from:", client_address, client_socket)
+        return client_socket, client_address
 
-    def handle_request (self):
+    def handle_request(self):
         # Handle one request
         try:
             request, client_address = self.get_request()
         except OSError:
             return
 
-        worker = threading.Thread(target=self.handle_one_request, args=(request, client_address))
-        # worker.daemon = True
+        worker = threading.Thread(target=self.__class__.handle_one_request, args=(request, client_address, self))
+        worker.daemon = self.daemon_threads
         # worker.join()
         worker.start()
-        print("current thread list : length:", len(threading.enumerate()), threading.enumerate())
+
+    @staticmethod
+    def log(request, client_address):
+        print(threading.current_thread(), " start handling ", request, " from ", client_address)
+        print("thread list:", len(threading.enumerate()), threading.enumerate())
 
     @classmethod
-    def handle_one_request (cls, request, client_address):
-        print(threading.current_thread(), " start handling ", request, " ", client_address)
-        if cls.verify_request(request, client_address):
-            try:
-                cls.process_request(request, client_address, cls.RequestHandlerClass)
-            except Exception as e:
-                cls.handle_error(request, client_address, e)
-                cls.shutdown_request(request)
-            except:
-                cls.shutdown_request(request)
-                raise
-        else:
+    def handle_one_request(cls, request, client_address, server):
+        cls.log(request, client_address)
+        try:
+            if cls.verify_request(request, client_address):
+                cls.process_request(request, client_address, cls.RequestHandlerClass, server)
+        except Exception as e:
+            cls.handle_error(request, client_address, e)
+        finally:
             cls.shutdown_request(request)
 
     @staticmethod
-    def process_request (request, client_address, RequestHandlerClass):
-        RequestHandlerClass(request, client_address)
+    def process_request(request, client_address, RequestHandlerClass, server):
+        return RequestHandlerClass(request, client_address, server)
 
     @staticmethod
-    def verify_request (request, client_address):
-        print("Got connection from:", client_address)
+    def verify_request(request, client_address):
         return True
 
     @staticmethod
-    def shutdown_request (request):
+    def shutdown_request(request):
         """Called to shutdown and close an individual request."""
         try:
             # explicitly shutdown.  socket.close() merely releases
             # the socket and waits for GC to perform the actual close.
             request.shutdown(socket.SHUT_WR)
+            print(threading.current_thread(), " shutdown ", request)
         except OSError:
             pass  # some platforms may raise ENOTCONN here
+        print(request, " closing")
         request.close()
 
     @staticmethod
-    def handle_error (request, client_address, exception):
-        print(exception, " happened during processing the connection from ", client_address)
+    def handle_error(request, client_address, e):
+        print(e, "happened during processing ", request, " from ", client_address)
         import traceback
         traceback.print_exc()
 
-    def fileno (self):
+    def fileno(self):
         return self.server_socket.fileno()
 
 
-def serve (app, host = "127.0.0.1", port = 38764):
+def serve(app, host = "127.0.0.1", port = 38764):
     handler_class = makeWSGIhandler(app)
     with HTTPServer(handler_class, (host, port)) as server:
         server.serve_forever()
