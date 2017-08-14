@@ -26,13 +26,15 @@ class Body:
     def __iter__(self):
         return self
 
+    def close(self):
+        self.io_raw_stream.close()
+
     def __next__(self):
         bytes = self.io_raw_stream.read(2048)
         if bytes:
             return bytes
         else:
-            self.io_raw_stream.close()
-            del self.io_raw_stream
+            self.close()
             raise StopIteration
 
 
@@ -75,14 +77,18 @@ class Response:
             "headers"              : self.generate_headers(self.headers)
         }
         self.http_head = Response.response_http_header_template.safe_substitute(self.http_args).encode("ascii")
+        self.start_response = start_response
         if start_response:
-            start_response(self.http_args["status"])
+            start_response(self.http_args["status"], list(self.headers.items()))
 
     def generate_headers(self, headers: dict):
         return "\n".join([Response.header_template.safe_substitute({
             "header_field": k,
             "value"       : v
         }) for k, v in headers.items()])
+
+    def close(self):
+        self.body.close()
 
     def __str__(self) -> str:
         return self.http_head
@@ -91,12 +97,10 @@ class Response:
         return self.__str__()
 
     def __iter__(self):
-        return self.iter(self.http_head, self.body)
+        if not self.start_response:
+            yield self.http_head
+        for chunk in self.body:
+            yield chunk
 
     def __call__(self, *args, **kwargs):
         return self.__iter__()
-
-    def iter(self, head, body):
-        yield head
-        for chunk in body:
-            yield chunk

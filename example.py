@@ -9,13 +9,13 @@ app = Application()
 
 
 @app.route("/")
-def hello (*args, **kwargs):
+def hello(*args, **kwargs):
     request = kwargs.pop("request")
     return json.dumps(request.headers)
 
 
 @app.route("/static/file")
-def file_provide_test (*args, **kwargs):
+def file_provide_test(*args, **kwargs):
     return app.send_static_file("testFile.htm")
 
 

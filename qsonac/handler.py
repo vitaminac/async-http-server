@@ -182,6 +182,7 @@ def makeWSGIhandler(wsgi_app):
         # the client gets back when sending a malformed request line.
         # Most web servers default to HTTP 0.9, i.e. don't send a status line.
         default_request_version = "HTTP/0.9"
+        default_response_version = "HTTP/1.1"
 
         # maximal line length when calling readline().
         Max_Bytes_Per_Line_Field = 65536
@@ -193,6 +194,8 @@ def makeWSGIhandler(wsgi_app):
         # The format is multiple whitespace-separated strings,
         # where each string is of the form name[/version].
         server_version = "Simple HTTP/" + __version__
+
+        http_head_encoding = "iso-8859-1"
 
         def __init__(self, request, client_address, server):
             self.request = request
@@ -231,8 +234,8 @@ def makeWSGIhandler(wsgi_app):
                 'SCRIPT_NAME'    : '',
                 'PATH_INFO'      : self.path,
                 'QUERY_STRING'   : '',
-                'SERVER_NAME'    : '',
-                'SERVER_PORT'    : '',
+                'SERVER_NAME'    : self.server.host,
+                'SERVER_PORT'    : self.server.port,
                 'SERVER_PROTOCOL': self.request_version,
                 'wsgi.version'   : (1, 0),
                 'wsgi.url_scheme': url_scheme,
@@ -283,7 +286,7 @@ def makeWSGIhandler(wsgi_app):
             """
             headers = []
             for i in range(self.Max_Headers):
-                line = fp.readline(self.Max_Bytes_Per_Line_Field).decode('iso-8859-1')
+                line = fp.readline(self.Max_Bytes_Per_Line_Field).decode(self.http_head_encoding)
                 headers.append(line)
                 if line in ('\r\n', '\n', ''):
                     break
@@ -299,7 +302,7 @@ def makeWSGIhandler(wsgi_app):
                 Return True for success, False for failure; on failure, an
                 error is sent back.
             """
-            self.requestline = str(self.raw_requestline, 'iso-8859-1').rstrip('\r\n')
+            self.requestline = str(self.raw_requestline, self.http_head_encoding).rstrip('\r\n')
             # Examine the headers and look for a Connection directive.
             # RFC 2145 section 3.1 says there can be only one "." and
             #   - major and minor numbers MUST be treated as
@@ -346,28 +349,44 @@ def makeWSGIhandler(wsgi_app):
             """
             self.raw_requestline = self.rfile.readline(self.Max_Bytes_Per_Line_Field)
             if self.raw_requestline:
-                if len(self.raw_requestline) > self.Max_Bytes_Per_Line_Field - 1:
+                if len(self.raw_requestline) < self.Max_Bytes_Per_Line_Field:
+                    self.log("try to parse request head")
+                    self.parse_request()
+                    self.handle_request()
+                else:
                     # 414 - 'Request-URI Too Long'
                     self.send_error(status_codes["414"])
-                    return
-
-                self.log("try to parse request head")
-                self.parse_request()
-                self.handle_request()
 
         def run_wsgi(self, conn, app):
+            str_buffer = []
 
             def write(data):
                 self.log("try to send to", data)
                 self.wfile.write(data)
 
+            def write_str_into_buffer(msg: str):
+                str_buffer.append(msg)
+
+            def flush_str_buffer():
+                write("".join(str_buffer).encode(self.http_head_encoding))
+                del str_buffer[:]
+
             def start_response(status, response_headers, exc_info = None):
+                write_str_into_buffer(f"{self.request_version}: {status}\r\n")
+                for header in response_headers:
+                    write_str_into_buffer(('%s: %s\r\n' % header))
+                write_str_into_buffer('\r\n')
+                flush_str_buffer()
                 return write
 
             def execute(app):
                 self.environ = self.make_environ()
-                for chunk in app(self.environ, start_response):
-                    write(chunk)
+                itr = app(self.environ, start_response)
+                try:
+                    for chunk in itr:
+                        write(chunk)
+                finally:
+                    itr.close()
 
             execute(app)
 
