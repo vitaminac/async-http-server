@@ -230,6 +230,200 @@ class Application:
             Applications conforming to this specification must not use any other methods or attributes of the input or errors objects.
             In particular, applications must not attempt to close these streams, even if they possess close() methods.
 
+        The start_response() Callable
+            The second parameter passed to the application object is a callable of the form
+            start_response(status, response_headers, exc_info=None).
+            (As with all WSGI callables, the arguments must be supplied positionally, not by keyword.)
+            The start_response callable is used to begin the HTTP response,
+            and it must return a write(body_data) callable (see the Buffering and Streaming section, below).
+
+            The status argument is an HTTP "status" string like "200 OK" or "404 Not Found".
+            That is, it is a string consisting of a Status-Code and a Reason-Phrase, in that order and separated by a single space,
+            with no surrounding whitespace or other characters. (See RFC 2616, Section 6.1.1 for more information.)
+            The string must not contain control characters, and must not be terminated with a carriage return, linefeed,
+            or combination thereof.
+
+            The response_headers argument is a list of (header_name, header_value) tuples.
+            It must be a Python list; i.e. type(response_headers) is ListType, and the server may change its contents in any way it desires.
+            Each header_name must be a valid HTTP header field-name (as defined by RFC 2616, Section 4.2),
+            without a trailing colon or other punctuation.
+
+            Each header_value must not include any control characters, including carriage returns or linefeeds, either embedded or at the end.
+            (These requirements are to minimize the complexity of any parsing that must be performed by servers, gateways,
+            and intermediate response processors that need to inspect or modify response headers.)
+
+            In general, the server or gateway is responsible for ensuring that correct headers are sent to the client:
+            if the application omits a header required by HTTP (or other relevant specifications that are in effect),
+            the server or gateway must add it. For example, the HTTP Date: and Server: headers would normally be supplied by the server or gateway.
+
+            (A reminder for server/gateway authors: HTTP header names are case-insensitive,
+            so be sure to take that into consideration when examining application-supplied headers!)
+
+            Applications and middleware are forbidden from using HTTP/1.1 "hop-by-hop" features or headers,
+            any equivalent features in HTTP/1.0, or any headers that would affect the persistence of the client's connection to the web server.
+            These features are the exclusive province of the actual web server, and a server or gateway should consider
+            it a fatal error for an application to attempt sending them, and raise an error if they are supplied to start_response().
+            (For more specifics on "hop-by-hop" features and headers, please see the Other HTTP Features section below.)
+
+            Servers should check for errors in the headers at the time start_response is called,
+            so that an error can be raised while the application is still running.
+
+            However, the start_response callable must not actually transmit the response headers.
+            Instead, it must store them for the server or gateway to transmit only after
+            the first iteration of the application return value that yields a non-empty bytestring,
+            or upon the application's first invocation of the write() callable.
+            In other words, response headers must not be sent until there is actual body data available,
+            or until the application's returned iterable is exhausted.
+            (The only possible exception to this rule is if the response headers explicitly include a Content-Length of zero.)
+
+            This delaying of response header transmission is to ensure that buffered and asynchronous applications
+            can replace their originally intended output with error output, up until the last possible moment.
+            For example, the application may need to change the response status from "200 OK" to "500 Internal Error",
+            if an error occurs while the body is being generated within an application buffer.
+
+            The exc_info argument, if supplied, must be a Python sys.exc_info() tuple.
+            This argument should be supplied by the application only if start_response is being called by an error handler.
+            If exc_info is supplied, and no HTTP headers have been output yet,
+            start_response should replace the currently-stored HTTP response headers with the newly-supplied ones,
+            thus allowing the application to "change its mind" about the output when an error has occurred.
+
+            However, if exc_info is provided, and the HTTP headers have already been sent,
+            start_response must raise an error, and should re-raise using the exc_info tuple. That is:
+                    raise exc_info[1].with_traceback(exc_info[2])
+
+            This will re-raise the exception trapped by the application, and in principle should abort the application.
+            (It is not safe for the application to attempt error output to the browser once the HTTP headers have already been sent.)
+            The application must not trap any exceptions raised by start_response, if it called start_response with exc_info.
+            Instead, it should allow such exceptions to propagate back to the server or gateway.
+            See Error Handling below, for more details.
+
+            The application may call start_response more than once, if and only if the exc_info argument is provided.
+            More precisely, it is a fatal error to call start_response without the exc_info argument
+            if start_response has already been called within the current invocation of the application.
+            This includes the case where the first call to start_response raised an error.
+            (See the example CGI gateway above for an illustration of the correct logic.)
+
+            Note: servers, gateways, or middleware implementing start_response should ensure that no reference
+            is held to the exc_info parameter beyond the duration of the function's execution,
+            to avoid creating a circular reference through the traceback and frames involved.
+
+        Handling the Content-Length Header
+            If the application supplies a Content-Length header,
+            the server should not transmit more bytes to the client than the header allows,
+            and should stop iterating over the response when enough data has been sent,
+            or raise an error if the application tries to write() past that point.
+            (Of course, if the application does not provide enough data to meet its stated Content-Length,
+            the server should close the connection and log or otherwise report the error.)
+
+            If the application does not supply a Content-Length header,
+            a server or gateway may choose one of several approaches to handling it.
+            The simplest of these is to close the client connection when the response is completed.
+
+            Under some circumstances, however, the server or gateway may be able to either generate a Content-Length header,
+            or at least avoid the need to close the client connection.
+            If the application does not call the write() callable, and returns an iterable whose len() is 1,
+            then the server can automatically determine Content-Length by taking the length of the first bytestring
+            yielded by the iterable.
+
+            And, if the server and client both support HTTP/1.1 "chunked encoding" [3],
+            then the server may use chunked encoding to send a chunk for each write() call or bytestring yielded by the iterable,
+            thus generating a Content-Length header for each chunk. This allows the server to keep the client connection alive,
+            if it wishes to do so. Note that the server must comply fully with RFC 2616 when doing this,
+            or else fall back to one of the other strategies for dealing with the absence of Content-Length.
+
+            (Note: applications and middleware must not apply any kind of Transfer-Encoding to their output,
+            such as chunking or gzipping; as "hop-by-hop" operations,
+            these encodings are the province of the actual web server/gateway.
+            See Other HTTP Features below, for more details.)
+
+        Buffering and Streaming
+            Generally speaking, applications will achieve the best throughput by buffering their (modestly-sized)
+            output and sending it all at once.
+            This is a common approach in existing frameworks such as Zope:
+            the output is buffered in a StringIO or similar object,
+            then transmitted all at once, along with the response headers.
+
+            The corresponding approach in WSGI is for the application to simply return a single-element iterable
+            (such as a list) containing the response body as a single bytestring.
+            This is the recommended approach for the vast majority of application functions,
+            that render HTML pages whose text easily fits in memory.
+
+            For large files, however, or for specialized uses of HTTP streaming (such as multipart "server push"),
+            an application may need to provide output in smaller blocks (e.g. to avoid loading a large file into memory).
+            It's also sometimes the case that part of a response may be time-consuming to produce,
+            but it would be useful to send ahead the portion of the response that precedes it.
+
+            In these cases, applications will usually return an iterator (often a generator-iterator)
+            that produces the output in a block-by-block fashion.
+            These blocks may be broken to coincide with mulitpart boundaries (for "server push"),
+            or just before time-consuming tasks (such as reading another block of an on-disk file).
+
+            WSGI servers, gateways, and middleware must not delay the transmission of any block;
+            they must either fully transmit the block to the client,
+            or guarantee that they will continue transmission even while the application is producing its next block.
+            A server/gateway or middleware may provide this guarantee in one of three ways:
+
+            1.  Send the entire block to the operating system (and request that any O/S buffers be flushed)
+                before returning control to the application, OR
+            2.  Use a different thread to ensure that the block continues to be transmitted
+                while the application produces the next block.
+            3.  (Middleware only) send the entire block to its parent gateway/server
+
+            By providing this guarantee, WSGI allows applications to ensure that transmission will not become stalled
+            at an arbitrary point in their output data.
+            This is critical for proper functioning of e.g. multipart "server push" streaming,
+            where data between multipart boundaries should be transmitted in full to the client.
+
+        Middleware Handling of Block Boundaries
+            In order to better support asynchronous applications and servers,
+            middleware components must not block iteration waiting for multiple values from an application iterable.
+            If the middleware needs to accumulate more data from the application before it can produce any output,
+            it must yield an empty bytestring.
+
+            To put this requirement another way, a middleware component must yield at least one value each time
+            its underlying application yields a value.
+            If the middleware cannot yield any other value, it must yield an empty bytestring.
+
+            This requirement ensures that asynchronous applications and servers can conspire to reduce the number of threads
+            that are required to run a given number of application instances simultaneously.
+
+            Note also that this requirement means that middleware must return an iterable as soon as its underlying
+            application returns an iterable.
+            It is also forbidden for middleware to use the write() callable to transmit data that is yielded by an underlying application.
+            Middleware may only use their parent server's write() callable to transmit data that the underlying application
+            sent using a middleware-provided write() callable.
+
+        The write() Callable
+            Some existing application framework APIs support unbuffered output in a different manner than WSGI.
+            Specifically, they provide a "write" function or method of some kind to write an unbuffered block of data,
+            or else they provide a buffered "write" function and a "flush" mechanism to flush the buffer.
+
+            Unfortunately, such APIs cannot be implemented in terms of WSGI's "iterable" application return value,
+            unless threads or other special mechanisms are used.
+
+            Therefore, to allow these frameworks to continue using an imperative API,
+            WSGI includes a special write() callable, returned by the start_response callable.
+
+            New WSGI applications and frameworks should not use the write() callable if it is possible to avoid doing so.
+            The write() callable is strictly a hack to support imperative streaming APIs.
+            In general, applications should produce their output via their returned iterable,
+            as this makes it possible for web servers to interleave other tasks in the same Python thread,
+            potentially providing better throughput for the server as a whole.
+
+            The write() callable is returned by the start_response() callable,
+            and it accepts a single parameter: a bytestring to be written as part of the HTTP response body,
+            that is treated exactly as though it had been yielded by the output iterable.
+            In other words, before write() returns,
+            it must guarantee that the passed-in bytestring was either completely sent to the client,
+            or that it is buffered for transmission while the application proceeds onward.
+
+            An application must return an iterable object, even if it uses write() to produce all or part of its response body.
+            The returned iterable may be empty (i.e. yield no non-empty bytestrings),
+            but if it does yield non-empty bytestrings, that output must be treated normally by the server or gateway
+            (i.e., it must be sent or queued immediately).
+            Applications must not invoke write() from within their return iterable,
+            and therefore any bytestrings yielded by the iterable are transmitted after all bytestrings passed to write() have been sent to the client.
+
         :param environ:
         :type dict:
         :param start_response:

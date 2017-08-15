@@ -1,6 +1,5 @@
 # coding=utf-8
 import io
-from email.utils import formatdate
 from string import Template
 from typing import Any, Callable, List, Tuple
 
@@ -43,8 +42,6 @@ class Response:
 
     status_template = Template('''$code $status''')
 
-    content_type_template = Template('''$type; charset=$encoding''')
-
     header_template = Template('''$header_field: $value''')
 
     def __init__(self, status_code: int, body = "", headers: dict = None, encoding: str = "utf-8", mimetype: str = "text/html", protocol_version: float = 1.1,
@@ -55,17 +52,10 @@ class Response:
         self.body = Body(body, encoding=encoding)
         self.headers = {
             # If a Content-Type header field is not present, the recipient MAY either assume a media type of application/octet-stream (RFC2046, Section 4.5.1) or examine the data to determine its type
-            "Content-Type"  : Response.content_type_template.safe_substitute({
-                "type"    : mimetype,
-                "encoding": encoding
-            }),
+            "Content-Type"  : f"{mimetype}; charset={encoding}",
             # The length of the request body in octets (8-bit bytes).
             "Content-Length": str(len(self.body)),
-            # The date and time that the message was sent (in "HTTP-date" format as defined by RFC 7231
-            "Date"          : formatdate(timeval=None, localtime=False, usegmt=True),
-            # A name for the server
-            "Server"        : "socket server",
-            "Connection"    : "Close" if conn_close else "Keep-Alive"
+            "Connection"    : "close" if conn_close else "keep-alive"
         }
         self.headers.update(headers)
         self.http_args = {

@@ -1,20 +1,26 @@
 # coding=utf-8
 
+import asyncio
 import socket
 import threading
 from selectors import EVENT_READ, SelectSelector
-from time import sleep
+
 from qsonac.handler import makeWSGIhandler
 
 
-class HTTPServer:
+class AsyncHTTPServer:
     # make it in class level, so can be accessed from class method, handle_one_request
     RequestHandlerClass = None
     address_family = socket.AF_INET
     socket_type = socket.SOCK_STREAM
     daemon_threads = True
 
-    def __init__(self, requestHandlerClass, client_address = ("127.0.0.1", 80), request_queue_size = 5):
+    version = "socket server"
+
+    def __init__(self, requestHandlerClass, loop, client_address = ("127.0.0.1", 80), request_queue_size = 5, multithread = True, multiprocess = False):
+        self.loop = loop
+        self.multithread = multithread
+        self.multiprocess = multiprocess
         self.request_queue_size = request_queue_size
         self.__class__.RequestHandlerClass = requestHandlerClass
         self.host, self.port = client_address
@@ -54,7 +60,7 @@ class HTTPServer:
                 self.service_actions()
 
     def service_actions(self):
-        sleep(0.5)
+        pass
 
     def get_request(self):
         # conn - socket to client
@@ -69,16 +75,10 @@ class HTTPServer:
             request, client_address = self.get_request()
         except OSError:
             return
-
         worker = threading.Thread(target=self.__class__.handle_one_request, args=(request, client_address, self))
         worker.daemon = self.daemon_threads
         # worker.join()
         worker.start()
-
-    @staticmethod
-    def log(request, client_address):
-        print(threading.current_thread(), " start handling ", request, " from ", client_address)
-        print("thread list:", len(threading.enumerate()), threading.enumerate())
 
     @classmethod
     def handle_one_request(cls, request, client_address, server):
@@ -90,6 +90,11 @@ class HTTPServer:
             cls.handle_error(request, client_address, e)
         finally:
             cls.shutdown_request(request)
+
+    @staticmethod
+    def log(request, client_address):
+        print(threading.current_thread(), " start handling ", request, " from ", client_address)
+        print("thread list:", len(threading.enumerate()), threading.enumerate())
 
     @staticmethod
     def process_request(request, client_address, RequestHandlerClass, server):
@@ -122,7 +127,9 @@ class HTTPServer:
         return self.server_socket.fileno()
 
 
-def serve(app, host = "127.0.0.1", port = 38764):
+def serve(app, host = "127.0.0.1", port = 38764, loop = None):
     handler_class = makeWSGIhandler(app)
-    with HTTPServer(handler_class, (host, port)) as server:
+    if not loop:
+        loop = asyncio.get_event_loop()
+    with AsyncHTTPServer(handler_class, loop, (host, port)) as server:
         server.serve_forever()

@@ -1,7 +1,7 @@
 # coding=utf-8
 from config import Config
 from qsonac.application import Application
-from qsonac.httpserver import serve
+from qsonac.asynchttpserver import serve
 
 import json
 

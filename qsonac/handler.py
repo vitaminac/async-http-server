@@ -1,11 +1,14 @@
 # coding=utf-8
 
 import socket
+import struct
 import sys
 import threading
+from email.utils import formatdate
 from io import BufferedIOBase
-from urllib.parse import urlparse, unquote
+from urllib.parse import unquote, urlparse
 
+from qsonac.response import Response
 from qsonac.status_codes import codes as status_codes
 
 
@@ -57,7 +60,8 @@ def makeWSGIhandler(wsgi_app):
 
         # A timeout to apply to the request socket, if not None.
         timeout = None
-
+        _timeout = 1500
+        recv_timeout = struct.pack('LL', _timeout, 0)
         # Disable nagle algorithm for this socket, if True.
         # Use only when wbufsize != 0, to avoid small packets.
         disable_nagle_algorithm = False
@@ -197,18 +201,22 @@ def makeWSGIhandler(wsgi_app):
 
         http_head_encoding = "iso-8859-1"
 
-        def __init__(self, request, client_address, server):
+        def __init__(self, request, client_address, server, debug: bool = False):
+            self.debug = True
             self.request = request
             self.client_address = client_address
             self._server = server
             self.request = request
             self.client_address = client_address
             self.log("handler created for")
+            self.response_head_buffer = { "status": "", "headers": { } }
             # self.server = server
             self.setup()
             try:
                 self.log("start handle ")
                 self.handle()
+            except (socket.timeout, TimeoutError) as e:
+                self.send_error(408, str(e))
             except Exception as e:
                 self.log("error happened during processing ", e)
                 import traceback
@@ -230,20 +238,22 @@ def makeWSGIhandler(wsgi_app):
             request_url = urlparse(self.path)
             url_scheme = 'https' if hasattr(self.server, "sslcontext") and self.server.ssl_context else 'http'
             environ = {
-                'REQUEST_METHOD' : self.command,
-                'SCRIPT_NAME'    : '',
-                'PATH_INFO'      : self.path,
-                'QUERY_STRING'   : '',
-                'SERVER_NAME'    : self.server.host,
-                'SERVER_PORT'    : self.server.port,
-                'SERVER_PROTOCOL': self.request_version,
-                'wsgi.version'   : (1, 0),
-                'wsgi.url_scheme': url_scheme,
-                'wsgi.input'     : self.rfile,
-                'wsgi.errors'    : sys.stderr,
-                'SERVER_SOFTWARE': self.server_version,
-                'REMOTE_ADDR'    : self.client_address[0],
-                'REMOTE_PORT'    : self.client_address[1],
+                'REQUEST_METHOD'   : self.command,
+                'SCRIPT_NAME'      : '',
+                'PATH_INFO'        : self.path,
+                'QUERY_STRING'     : '',
+                'SERVER_NAME'      : self.server.host,
+                'SERVER_PORT'      : self.server.port,
+                'SERVER_PROTOCOL'  : self.request_version,
+                'wsgi.version'     : (1, 0),
+                'wsgi.url_scheme'  : url_scheme,
+                'wsgi.input'       : self.rfile,
+                'wsgi.errors'      : sys.stderr,
+                "wsgi.multithread" : self.server.multithread,
+                "wsgi.multiprocess": self.server.multiprocess,
+                'SERVER_SOFTWARE'  : self.server_version,
+                'REMOTE_ADDR'      : self.client_address[0],
+                'REMOTE_PORT'      : self.client_address[1],
             }
             for key, value in self.headers.items():
                 key = key.upper().replace('-', '_')
@@ -260,6 +270,7 @@ def makeWSGIhandler(wsgi_app):
 
         def setup(self):
             self.connection = self.request
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, self.recv_timeout)
             self.connection.settimeout(self.timeout)
             if self.disable_nagle_algorithm:
                 self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
@@ -271,8 +282,9 @@ def makeWSGIhandler(wsgi_app):
             self.wfile.close()
             self.rfile.close()
 
-        def send_error(self, code, message = None, explain = None):
-            pass
+        def send_error(self, code: int, message: str = "error occured", explain = None):
+            if self.debug:
+                self.write_itr(Response(code, message))
 
         def parse_headers(self, fp):
             """Parses only RFC2822 headers from a file pointer.
@@ -327,7 +339,7 @@ def makeWSGIhandler(wsgi_app):
             if self.headers.get('Expect', '').lower().strip() == '100-continue':
                 self.wfile.write(b'HTTP/1.1 100 Continue\r\n\r\n')
             self.log("try to run wsgi app")
-            self.run_wsgi(self.request, wsgi_app)
+            self.run_wsgi(wsgi_app)
 
         def handle(self):
             '''
@@ -347,6 +359,7 @@ def makeWSGIhandler(wsgi_app):
                 commands such as GET and POST.
                 
             """
+            self.log("try to read http head line from ")
             self.raw_requestline = self.rfile.readline(self.Max_Bytes_Per_Line_Field)
             if self.raw_requestline:
                 if len(self.raw_requestline) < self.Max_Bytes_Per_Line_Field:
@@ -357,36 +370,59 @@ def makeWSGIhandler(wsgi_app):
                     # 414 - 'Request-URI Too Long'
                     self.send_error(status_codes["414"])
 
-        def run_wsgi(self, conn, app):
-            str_buffer = []
-
-            def write(data):
+        def write(self, data):
+            if data:
+                if hasattr(self, "response_head_buffer") and self.response_head_buffer:
+                    buffer = [self.response_head_buffer["status"]] + [('%s: %s\r\n' % header) for header in self.response_head_buffer["headers"].items()] + ["\r\n"]
+                    http_head = "".join(buffer).encode(self.http_head_encoding)
+                    self.log("try to send response head", http_head)
+                    self.wfile.write(http_head)
+                    # del such buffer, if application intent to reset header will raise exception in start response
+                    del self.response_head_buffer
                 self.log("try to send to", data)
                 self.wfile.write(data)
 
-            def write_str_into_buffer(msg: str):
-                str_buffer.append(msg)
+        def write_itr(self, itr):
+            try:
+                for chunk in itr:
+                    self.write(chunk)
+            finally:
+                itr.close()
 
-            def flush_str_buffer():
-                write("".join(str_buffer).encode(self.http_head_encoding))
-                del str_buffer[:]
+        def run_wsgi(self, app):
+            """
+            some point that doesnt implement according to PEP 3333,
+            1. not check exc_info in start_response if application try to modify already set status or headers
+            2. doesn't guarantee to yield only n bytes specify in content-length
+            3. doesn't guarantee a line-end like in request body
 
+            :param app:
+            :type app:
+            :return: None
+            :rtype: None
+            """
+
+            # this could be called more than once
             def start_response(status, response_headers, exc_info = None):
-                write_str_into_buffer(f"{self.request_version}: {status}\r\n")
-                for header in response_headers:
-                    write_str_into_buffer(('%s: %s\r\n' % header))
-                write_str_into_buffer('\r\n')
-                flush_str_buffer()
-                return write
+                headers = dict([(key.capitalize(), value) for key, value in response_headers])
+                if 'Content-length' not in headers:
+                    headers["Connection"] = "close"
+                if 'Server' not in headers:
+                    # A name for the server
+                    headers['Server'] = self.server.version
+                if 'Date' not in headers:
+                    # The date and time that the message was sent (in "HTTP-date" format as defined by RFC 7231
+                    headers['Date'] = formatdate(timeval=None, localtime=False, usegmt=True)
+                # will raise exception if try reset headers after it has already been sent
+                self.response_head_buffer["status"] = f"{self.request_version} {status}\r\n"
+                self.response_head_buffer["headers"] = headers
+                exc_info = None  # Avoid circular
+                return self.write
 
             def execute(app):
                 self.environ = self.make_environ()
-                itr = app(self.environ, start_response)
-                try:
-                    for chunk in itr:
-                        write(chunk)
-                finally:
-                    itr.close()
+                app_itr = app(self.environ, start_response)
+                self.write_itr(app_itr)
 
             execute(app)
 

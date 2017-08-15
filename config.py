@@ -5,6 +5,6 @@ localhost = "127.0.0.1"
 
 
 class Config:
-    host = localhost
+    host = loopback
     port = 48539
     message = "Hello, World!"
