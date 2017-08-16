@@ -3,11 +3,11 @@
 import socket
 import struct
 import sys
-import threading
 from email.utils import formatdate
 from io import BufferedIOBase
 from urllib.parse import unquote, urlparse
 
+import asyncio
 from qsonac.response import Response
 from qsonac.status_codes import codes as status_codes
 
@@ -210,8 +210,15 @@ def makeWSGIhandler(wsgi_app):
             self.client_address = client_address
             self.log("handler created for")
             self.response_head_buffer = { "status": "", "headers": { } }
-            # self.server = server
+
+        async def __aenter__(self):
             self.setup()
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        async def __coro_call__(self, *args, **kwargs):
             try:
                 self.log("start handle ")
                 self.handle()
@@ -222,14 +229,18 @@ def makeWSGIhandler(wsgi_app):
                 import traceback
                 traceback.print_exc()
             finally:
-                self.finish()
+                await self.finish()
+
+        def __await__(self):
+            return self.__coro_call__().__await__()
 
         @property
         def server(self):
             return self._server
 
         def log(self, msg, *args):
-            print(threading.current_thread(), ":", msg, self.request, "from", self.client_address, sep="")
+            # print(threading.current_thread(), ":", msg, self.request, "from", self.client_address, sep="")
+            print(asyncio.Task.current_task(), ":", msg, self.request, "from", self.client_address, sep="")
             if args:
                 print("more info", args, sep="")
             print()
@@ -268,16 +279,20 @@ def makeWSGIhandler(wsgi_app):
 
             return environ
 
-        def setup(self):
+        def configure_connection(self):
             self.connection = self.request
+            self.connection.setblocking(False)
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, self.recv_timeout)
             self.connection.settimeout(self.timeout)
             if self.disable_nagle_algorithm:
                 self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
+
+        def setup(self):
+            self.configure_connection()
             self.rfile = self.connection.makefile('rb', self.rbufsize)
             self.wfile = _SocketWriter(self.connection)
 
-        def finish(self):
+        async def finish(self):
             self.log("completed handling")
             self.wfile.close()
             self.rfile.close()
