@@ -10,61 +10,20 @@ from urllib.parse import unquote, urlparse
 import asyncio
 from qsonac.response import Response
 from qsonac.status_codes import codes as status_codes
-
-
-class _SocketWriter(BufferedIOBase):
-    """Simple writable BufferedIOBase implementation for a socket
-
-    Does not hold data in a buffer, avoiding any need to call flush()."""
-
-    def __init__(self, sock):
-        self._sock = sock
-
-    def writable(self):
-        return True
-
-    def write(self, b):
-        self._sock.sendall(b)
-        with memoryview(b) as view:
-            return view.nbytes
-
-    def fileno(self):
-        return self._sock.fileno()
+from qsonac.streamsock import StreamSock
 
 
 def makeWSGIhandler(wsgi_app):
     class WSGIRequestHandler():
-        """A request handler that implements WSGI dispatching."""
         """
-        HTTP request handler base class.
-
-        This class is instantiated for each request to be handled.
-        The constructor sets the instance variables request, client_address
-        and server, and then calls the handle() method.
+            A HTTP request handler that implements WSGI dispatching.
+            This class is instantiated for each request to be handled.
+            The constructor sets the instance variables request, client_address
+            and server, and then calls the handle() method.
         """
 
         # from factory function makeWSGIhandler
         app = wsgi_app
-
-        # Define self.rfile and self.wfile for stream sockets.
-
-        # Default buffer sizes for rfile, wfile.
-        # We default rfile to buffered because otherwise it could be
-        # really slow for large data (a getc() call per byte); we make
-        # wfile unbuffered because (a) often after a write() we want to
-        # read and we need to flush the line; (b) big writes to unbuffered
-        # files are typically optimized by stdio even when big reads
-        # aren't.
-        rbufsize = -1
-        wbufsize = 0
-
-        # A timeout to apply to the request socket, if not None.
-        timeout = None
-        _timeout = 1500
-        recv_timeout = struct.pack('LL', _timeout, 0)
-        # Disable nagle algorithm for this socket, if True.
-        # Use only when wbufsize != 0, to avoid small packets.
-        disable_nagle_algorithm = False
 
         """
         HTTP (HyperText Transfer Protocol) is an extensible protocol on
@@ -197,22 +156,19 @@ def makeWSGIhandler(wsgi_app):
         # The server software version.  You may want to override this.
         # The format is multiple whitespace-separated strings,
         # where each string is of the form name[/version].
-        server_version = "Simple HTTP/" + __version__
+        server_version = "Simple Asynchronous HTTP Server/" + __version__
 
         http_head_encoding = "iso-8859-1"
 
-        def __init__(self, request, client_address, server, debug: bool = False):
-            self.debug = True
-            self.request = request
-            self.client_address = client_address
-            self._server = server
-            self.request = request
-            self.client_address = client_address
+        def __init__(self, requestStream: StreamSock, debug: bool = True):
+            self.debug = debug
+            self.request = requestStream
             self.log("handler created for")
             self.response_head_buffer = { "status": "", "headers": { } }
 
+        # region <async flow>
+
         async def __aenter__(self):
-            self.setup()
             return self
 
         async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -221,7 +177,7 @@ def makeWSGIhandler(wsgi_app):
         async def __coro_call__(self, *args, **kwargs):
             try:
                 self.log("start handle ")
-                self.handle()
+                await self.handle()
             except (socket.timeout, TimeoutError) as e:
                 self.send_error(408, str(e))
             except Exception as e:
@@ -234,37 +190,36 @@ def makeWSGIhandler(wsgi_app):
         def __await__(self):
             return self.__coro_call__().__await__()
 
-        @property
-        def server(self):
-            return self._server
+        # endregion
+
+
 
         def log(self, msg, *args):
             # print(threading.current_thread(), ":", msg, self.request, "from", self.client_address, sep="")
-            print(asyncio.Task.current_task(), ":", msg, self.request, "from", self.client_address, sep="")
+            print(asyncio.Task.current_task(), ":", msg, self.request, "from", self.request.remote_address, sep="")
             if args:
                 print("more info", args, sep="")
             print()
 
         def make_environ(self):
             request_url = urlparse(self.path)
-            url_scheme = 'https' if hasattr(self.server, "sslcontext") and self.server.ssl_context else 'http'
             environ = {
                 'REQUEST_METHOD'   : self.command,
                 'SCRIPT_NAME'      : '',
                 'PATH_INFO'        : self.path,
                 'QUERY_STRING'     : '',
-                'SERVER_NAME'      : self.server.host,
-                'SERVER_PORT'      : self.server.port,
+                'SERVER_NAME'      : self.request.host,
+                'SERVER_PORT'      : self.request.port,
                 'SERVER_PROTOCOL'  : self.request_version,
                 'wsgi.version'     : (1, 0),
-                'wsgi.url_scheme'  : url_scheme,
-                'wsgi.input'       : self.rfile,
+                'wsgi.url_scheme'  : "http",
+                'wsgi.input'       : self.request,
                 'wsgi.errors'      : sys.stderr,
-                "wsgi.multithread" : self.server.multithread,
-                "wsgi.multiprocess": self.server.multiprocess,
+                "wsgi.multithread" : self.request.server.multithread,
+                "wsgi.multiprocess": self.request.server.multiprocess,
                 'SERVER_SOFTWARE'  : self.server_version,
-                'REMOTE_ADDR'      : self.client_address[0],
-                'REMOTE_PORT'      : self.client_address[1],
+                'REMOTE_ADDR'      : self.request.remote_host,
+                'REMOTE_PORT'      : self.request.remote_port,
             }
             for key, value in self.headers.items():
                 key = key.upper().replace('-', '_')
@@ -279,23 +234,9 @@ def makeWSGIhandler(wsgi_app):
 
             return environ
 
-        def configure_connection(self):
-            self.connection = self.request
-            self.connection.setblocking(False)
-            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, self.recv_timeout)
-            self.connection.settimeout(self.timeout)
-            if self.disable_nagle_algorithm:
-                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
-
-        def setup(self):
-            self.configure_connection()
-            self.rfile = self.connection.makefile('rb', self.rbufsize)
-            self.wfile = _SocketWriter(self.connection)
-
         async def finish(self):
             self.log("completed handling")
-            self.wfile.close()
-            self.rfile.close()
+            await self.request.close()
 
         def send_error(self, code: int, message: str = "error occured", explain = None):
             if self.debug:
@@ -341,7 +282,7 @@ def makeWSGIhandler(wsgi_app):
             self.path = unquote(self.path)
             if self.request_version[:5] != 'HTTP/':
                 raise ValueError
-            self.headers = self.parse_headers(self.rfile)
+            self.headers = self.parse_headers(self.request)
             self.log("request headers parsed", self.headers)
             try:
                 conntype = self.headers["Connection"]
@@ -352,11 +293,11 @@ def makeWSGIhandler(wsgi_app):
 
         def handle_request(self):
             if self.headers.get('Expect', '').lower().strip() == '100-continue':
-                self.wfile.write(b'HTTP/1.1 100 Continue\r\n\r\n')
+                self.request.write(b'HTTP/1.1 100 Continue\r\n\r\n')
             self.log("try to run wsgi app")
             self.run_wsgi(wsgi_app)
 
-        def handle(self):
+        async def handle(self):
             '''
             The handle() method can find the request as self.request, the
             client address as self.client_address, and the server (in case it
@@ -375,7 +316,7 @@ def makeWSGIhandler(wsgi_app):
                 
             """
             self.log("try to read http head line from ")
-            self.raw_requestline = self.rfile.readline(self.Max_Bytes_Per_Line_Field)
+            self.raw_requestline = await self.request.readline(self.Max_Bytes_Per_Line_Field)
             if self.raw_requestline:
                 if len(self.raw_requestline) < self.Max_Bytes_Per_Line_Field:
                     self.log("try to parse request head")
@@ -391,11 +332,11 @@ def makeWSGIhandler(wsgi_app):
                     buffer = [self.response_head_buffer["status"]] + [('%s: %s\r\n' % header) for header in self.response_head_buffer["headers"].items()] + ["\r\n"]
                     http_head = "".join(buffer).encode(self.http_head_encoding)
                     self.log("try to send response head", http_head)
-                    self.wfile.write(http_head)
+                    self.request.write(http_head)
                     # del such buffer, if application intent to reset header will raise exception in start response
                     del self.response_head_buffer
                 self.log("try to send to", data)
-                self.wfile.write(data)
+                self.request.write(data)
 
         def write_itr(self, itr):
             try:
@@ -424,7 +365,7 @@ def makeWSGIhandler(wsgi_app):
                     headers["Connection"] = "close"
                 if 'Server' not in headers:
                     # A name for the server
-                    headers['Server'] = self.server.version
+                    headers['Server'] = self.request.server.version
                 if 'Date' not in headers:
                     # The date and time that the message was sent (in "HTTP-date" format as defined by RFC 7231
                     headers['Date'] = formatdate(timeval=None, localtime=False, usegmt=True)

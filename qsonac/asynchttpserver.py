@@ -1,9 +1,11 @@
 # coding=utf-8
 
+import errno
 import socket
 
 import asyncio
 from qsonac.handler import makeWSGIhandler
+from qsonac.streamsock import StreamSock
 
 
 class AsyncHTTPServer:
@@ -15,9 +17,13 @@ class AsyncHTTPServer:
 
     version = "socket server"
 
+    # Seconds to wait before retrying accept().
+    ACCEPT_RETRY_DELAY = 1
+
     def __init__(self, requestHandlerClass, client_address = ("127.0.0.1", 80), loop = None, request_queue_size = 15, multithread = False, multiprocess = False):
         if not loop:
             loop = asyncio.get_event_loop()
+        self.handler_list = { }
         self.loop = loop
         self.multithread = multithread
         self.multiprocess = multiprocess
@@ -54,20 +60,21 @@ class AsyncHTTPServer:
         # self._selector.close()
         self.server_socket.close()
 
-    def serve_forever(self):
+    def start_serve(self):
         """ Main loop awaiting connections """
         # self._selector.register(self, selectors.EVENT_READ)
         # add event listener to server socket
         self.loop.add_reader(self, self.handle_requests)
+
+    def serve_forever(self):
+        self.start_serve()
         self.loop.run_forever()
 
     def handle_requests(self):
-        # the call won’t block, and will report the currently ready file objects
-        # ready = self._selector.select(0)
-        # print(self.server_socket, "become ready")
-        # while ready:
-        #     self.deal_one_request()
-        #     ready = self._selector.select(0)
+        # This method is only called once for each event loop tick where the
+        # listening socket has triggered an EVENT_READ. There may be multiple
+        # connections waiting for an .accept() so it is called in a loop.
+        # See https://bugs.python.org/issue27906 for more details.
         for i in range(self.request_queue_size):
             try:
                 # Handle one request
@@ -75,6 +82,22 @@ class AsyncHTTPServer:
             except (BlockingIOError, InterruptedError, ConnectionAbortedError):
                 # Early exit because the socket accept buffer is empty.
                 break
+            except OSError as exc:
+                # There's nowhere to send the error, so just log it.
+                if exc.errno in (errno.EMFILE, errno.ENFILE,
+                                 errno.ENOBUFS, errno.ENOMEM):
+                    # Some platforms (e.g. Linux keep reporting the FD as
+                    # ready, so we remove the read handler temporarily.
+                    # We'll try again in a while.
+                    self.log(self.server_socket, (self.host, self.port), str({
+                        'message'  : 'socket.accept() out of system resource',
+                        'exception': exc,
+                        'socket'   : self.server_socket,
+                    }))
+                    self.loop.remove_reader(self)
+                    self.loop.call_later(self.ACCEPT_RETRY_DELAY, self.start_serve)
+                else:
+                    raise  # The event loop will catch, log and ignore it.
             else:
                 self.create_new_request_handler(request, client_address)
         # perform periodic task
@@ -96,7 +119,7 @@ class AsyncHTTPServer:
         # worker.daemon = self.daemon_threads
         # # worker.join()
         # worker.start()
-        asyncio.ensure_future(self.handle_one_request(request, client_address, self), loop=self.loop)
+        self.loop.create_task(self.handle_one_request(request, client_address, self))
 
     @classmethod
     @asyncio.coroutine
@@ -118,8 +141,9 @@ class AsyncHTTPServer:
 
     @staticmethod
     async def process_request(request, client_address, RequestHandlerClass, server):
-        async with RequestHandlerClass(request, client_address, server) as handle:
-            return await handle
+        async with StreamSock(server.loop, request, server) as streamRW:
+            async with RequestHandlerClass(streamRW) as handle:
+                return await handle
 
     @staticmethod
     def verify_request(request, client_address):
@@ -151,6 +175,13 @@ class AsyncHTTPServer:
 
     def fileno(self):
         return self.server_socket.fileno()
+
+    def attach(self, handler, conn):
+        self.handler_list[handler] = conn
+
+    def detach(self, handler, exc):
+        del self.handler_list[handler]
+        print(handler, exc)
 
 
 def serve(app, host = "127.0.0.1", port = 38764, loop = None):
