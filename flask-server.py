@@ -12,7 +12,7 @@ def hello_world ():
 
 @app.route("/static/file")
 def file_provide_test ():
-    return send_file("testFile.htm")
+    return send_file("./static/testFile.htm")
 
 
 app.run(Config.host, Config.port, threaded=True)

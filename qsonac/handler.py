@@ -1,13 +1,10 @@
 # coding=utf-8
 
-import socket
-import struct
+import asyncio
 import sys
 from email.utils import formatdate
-from io import BufferedIOBase
 from urllib.parse import unquote, urlparse
 
-import asyncio
 from qsonac.response import Response
 from qsonac.status_codes import codes as status_codes
 from qsonac.streamsock import StreamSock
@@ -178,8 +175,8 @@ def makeWSGIhandler(wsgi_app):
             try:
                 self.log("start handle ")
                 await self.handle()
-            except (socket.timeout, TimeoutError) as e:
-                self.send_error(408, str(e))
+            except  TimeoutError as e:
+                await self.send_error(408, str(e))
             except Exception as e:
                 self.log("error happened during processing ", e)
                 import traceback
@@ -238,11 +235,11 @@ def makeWSGIhandler(wsgi_app):
             self.log("completed handling")
             await self.request.close()
 
-        def send_error(self, code: int, message: str = "error occured", explain = None):
+        async def send_error(self, code: int, message: str = "error occured", explain = None):
             if self.debug:
-                self.write_itr(Response(code, message))
+                await self.write_itr(Response(code, message))
 
-        def parse_headers(self, fp):
+        async def parse_headers(self, fp):
             """Parses only RFC2822 headers from a file pointer.
 
             email Parser wants to see strings rather than bytes.
@@ -254,13 +251,14 @@ def makeWSGIhandler(wsgi_app):
             """
             headers = []
             for i in range(self.Max_Headers):
-                line = fp.readline(self.Max_Bytes_Per_Line_Field).decode(self.http_head_encoding)
+                line = await fp.readline(self.Max_Bytes_Per_Line_Field)
+                line = line.decode(self.http_head_encoding)
                 headers.append(line)
                 if line in ('\r\n', '\n', ''):
                     break
             return dict([(s[0], "".join(s[1:])) for s in ([header.strip().split(":") for header in headers])])
 
-        def parse_request(self):
+        async def parse_request(self):
             """Parse a request (internal)."""
             """
                 The request should be stored in self.raw_requestline; the results
@@ -282,7 +280,7 @@ def makeWSGIhandler(wsgi_app):
             self.path = unquote(self.path)
             if self.request_version[:5] != 'HTTP/':
                 raise ValueError
-            self.headers = self.parse_headers(self.request)
+            self.headers = await self.parse_headers(self.request)
             self.log("request headers parsed", self.headers)
             try:
                 conntype = self.headers["Connection"]
@@ -291,11 +289,11 @@ def makeWSGIhandler(wsgi_app):
             except KeyError:
                 self.close_connection = True
 
-        def handle_request(self):
+        async def handle_request(self):
             if self.headers.get('Expect', '').lower().strip() == '100-continue':
                 self.request.write(b'HTTP/1.1 100 Continue\r\n\r\n')
             self.log("try to run wsgi app")
-            self.run_wsgi(wsgi_app)
+            await self.run_wsgi(wsgi_app)
 
         async def handle(self):
             '''
@@ -318,34 +316,34 @@ def makeWSGIhandler(wsgi_app):
             self.log("try to read http head line from ")
             self.raw_requestline = await self.request.readline(self.Max_Bytes_Per_Line_Field)
             if self.raw_requestline:
-                if len(self.raw_requestline) < self.Max_Bytes_Per_Line_Field:
+                if self.raw_requestline.endswith(b"\n"):
                     self.log("try to parse request head")
-                    self.parse_request()
-                    self.handle_request()
+                    await self.parse_request()
+                    await self.handle_request()
                 else:
                     # 414 - 'Request-URI Too Long'
-                    self.send_error(status_codes["414"])
+                    await self.send_error(status_codes["414"])
 
-        def write(self, data):
+        async def write(self, data):
             if data:
                 if hasattr(self, "response_head_buffer") and self.response_head_buffer:
                     buffer = [self.response_head_buffer["status"]] + [('%s: %s\r\n' % header) for header in self.response_head_buffer["headers"].items()] + ["\r\n"]
                     http_head = "".join(buffer).encode(self.http_head_encoding)
                     self.log("try to send response head", http_head)
-                    self.request.write(http_head)
+                    await self.request.write(http_head)
                     # del such buffer, if application intent to reset header will raise exception in start response
                     del self.response_head_buffer
                 self.log("try to send to", data)
-                self.request.write(data)
+                return await self.request.write(data)
 
-        def write_itr(self, itr):
+        async def write_itr(self, itr):
             try:
                 for chunk in itr:
-                    self.write(chunk)
+                    await self.write(chunk)
             finally:
                 itr.close()
 
-        def run_wsgi(self, app):
+        async def run_wsgi(self, app):
             """
             some point that doesnt implement according to PEP 3333,
             1. not check exc_info in start_response if application try to modify already set status or headers
@@ -375,11 +373,11 @@ def makeWSGIhandler(wsgi_app):
                 exc_info = None  # Avoid circular
                 return self.write
 
-            def execute(app):
+            async def execute(app):
                 self.environ = self.make_environ()
                 app_itr = app(self.environ, start_response)
-                self.write_itr(app_itr)
+                await self.write_itr(app_itr)
 
-            execute(app)
+            await execute(app)
 
     return WSGIRequestHandler

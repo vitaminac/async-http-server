@@ -1,9 +1,10 @@
 # coding=utf-8
 
+import asyncio
 import errno
+import logging
 import socket
 
-import asyncio
 from qsonac.handler import makeWSGIhandler
 from qsonac.streamsock import StreamSock
 
@@ -25,6 +26,8 @@ class AsyncHTTPServer:
             loop = asyncio.get_event_loop()
         self.handler_list = { }
         self.loop = loop
+        self.loop.set_debug(True)
+        logging.getLogger('asyncio').setLevel(logging.WARNING)
         self.multithread = multithread
         self.multiprocess = multiprocess
         self.request_queue_size = request_queue_size

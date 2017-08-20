@@ -1,7 +1,6 @@
 # coding=utf-8
-import socket
-
 import asyncio
+import socket
 
 
 class StreamSock:
@@ -21,6 +20,7 @@ class StreamSock:
         self._loop = loop
         self.exception = None
         self._waiter = None  # A future used by wait_for_()
+        self.timeout = 3  # 30 second, it can be change with set timeout
 
         """SocketTransport"""
         self._sock = sock
@@ -40,6 +40,10 @@ class StreamSock:
         self._read_eof = False  # when all data are in read_buffer
 
     # region <getter>
+
+    @property
+    def closed(self):
+        return self.fileno() == -1
 
     @property
     def socket(self):
@@ -71,7 +75,7 @@ class StreamSock:
 
     @property
     def remote_port(self):
-        return self.remote_address()[1]
+        return self.remote_address[1]
 
     def fileno(self):
         return self.socket.fileno()
@@ -81,32 +85,44 @@ class StreamSock:
     # region <static method>
 
     @staticmethod
-    def configure_connection(socket):
-        socket.setblocking(False)
+    def configure_connection(sock):
+        sock.setblocking(False)
         # Disable the Nagle algorithm -- small writes will be
         # sent without waiting for the TCP ACK.  This generally
         # decreases the latency (in some cases significantly.)
         if hasattr(socket, 'TCP_NODELAY'):
-            socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
+
+    # endregion
+
+    # region <method with no side effect>
+
+    def setup(self):
+        self.configure_connection(self.socket)
+        self.set_write_buffer_limits()
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def log(self, msg: str):
+        print(self.socket, msg, self)
 
     # endregion
 
     # region <asynchronous action control flow>
-    def setup(self):
-        self.configure_connection(self.socket)
-        self.set_write_buffer_limits()
-        self.pause_read()  # fill read buffer
 
     async def __aenter__(self):
         self.setup()
         if self.server is not None:
             self.server.attach(self, self.socket)
+        return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
         if self.server is not None:
-            self.server.detach(self, self, self.exception)
+            self.server.detach(self, self.exception)
             self._server = None
+        return False
 
     async def __aiter__(self):
         return self
@@ -118,11 +134,15 @@ class StreamSock:
         return val
 
     async def wait_stream_ready(self):
+        assert not self.closed, "warning: try to wait a closed connection"
         waiter = self._waiter
         assert waiter is None or waiter.cancelled() or waiter.done()
         waiter = self._loop.create_future()
         self._waiter = waiter
-        return await waiter
+        try:
+            return await asyncio.wait_for(waiter, self.timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError
 
     def _wakeup_waiter(self):
         """Wakeup  functions waiting for reading/writing data or EOF."""
@@ -130,7 +150,10 @@ class StreamSock:
         if waiter is not None:
             self._waiter = None
             assert not waiter.cancelled() and not waiter.done()
-            waiter.set_result(self.exception)  # if had exception set to waiter
+            if self.exception:
+                waiter.set_exception(self.exception)
+            else:
+                waiter.set_result(None)  # if had exception set to waiter
 
     # endregion
 
@@ -139,49 +162,40 @@ class StreamSock:
     def release_resource(self):
         self._read_buffer.clear()
         self._write_buffer.clear()
-        self.socket.shutdown(socket.SHUT_RDWR)
         self.socket.close()
-        self._sock = None
-        self._loop = None
+        # self._sock = None
+        # self._loop = None
 
-    def _force_close(self):
-        self._loop.remove_reader(self)
-        self._loop.remove_writer(self)
-        self.closed = True
-        self.release_resource()
-
-    def abort(self):
-        """Close the transport immediately.
+    def force_close(self):
+        """
+        Close the transport immediately.
 
         Buffered data will be lost.  No more data will be received.
-        The protocol's connection_lost() method will (eventually) be
-        called with None as its argument.
         """
-        self._force_close()
+        if not self.closed:
+            self._loop.remove_reader(self)
+            self._loop.remove_writer(self)
+            self.socket.shutdown(socket.SHUT_RDWR)
+        self.release_resource()
 
     async def close(self):
         """
         Close the transport.
 
-        Buffered data will be flushed asynchronously.  No more data
-        will be received.  After all buffered data is flushed, the
-        protocol's connection_lost() method will (eventually) called
-        with None as its argument.
-        """
-        self.feed_eof()
-        # try to drain all data in timeout interval
-        self.write_eof()
+        Buffered data will be flushed asynchronously.  No more data will be received."""
+        # try to drain all data in self.timeout interval, and force close it
+        if self.closed:
+            return
         try:
-            await asyncio.wait_for(self.drain(), 5)  # wait at most 5 sec, and force close it
+            await self.write_eof()
         except Exception as e:
             self.exception = e
-        self._force_close()
+        self.force_close()
 
     def _fatal_error(self, exc, message = 'Fatal error on transport'):
         # Should be called from exception handler only.
         self.exception = exc
         self._wakeup_waiter()  # wake up with exception
-        self.abort()
 
     # endregion
 
@@ -198,26 +212,31 @@ class StreamSock:
             transport is up to the protocol.
         """
         self._read_eof = True
+        self.log("received EOF")
+
         # We're keeping the connection open so the
         # protocol can write more, but we still can't
         # receive more, so remove the reader callback.
-        self._loop.remove_reader(self)
         self.socket.shutdown(socket.SHUT_RD)
         return True
 
-    def write_eof(self):
-        """Close the write end after flushing buffered data.
+    async def write_eof(self):
+        """
+        Close the write end after flushing buffered data.
 
         (This is like typing ^D into a UNIX program reading from stdin.)
 
         Data may still be received.
+
+        it can be call multitime, but if connection was closed, it will raise exception
         """
+        self.log("wrote EOF")
         self._write_eof = True
         # shutdown will be done in next drain
         # ensure next drain will send all data in write buffer
         self.set_write_buffer_limits(0)
         # schedule the drain
-        self._loop.create_task(self.drain())
+        await self.drain()
 
     # endregion
 
@@ -225,24 +244,26 @@ class StreamSock:
 
     # region <read-only>
 
-    def pause_read(self):
+    async def pause_reading(self):
         """
         Pause all read method, wait to receive underlying data into read_buffer
         """
-        assert self._read_paused, 'Already paused'
+        assert not self._read_paused, 'Already paused'
         self._read_paused = True
         self._loop.add_reader(self, self.feed_data_when_ready)
-        print("%r pauses reading", self)
+        self.log("pauses reading")
+        await self.wait_stream_ready()
+        self.log("pauses reading finished")
 
-    def resume_read(self):
+    def resume_reading(self):
         """
         read buffer filled, now can be read again, wake up any coroutine function that wait for read
         """
-        assert not self._read_paused, 'Not paused'
+        assert self._read_paused, 'Not paused'
         self._read_paused = False
         self._loop.remove_reader(self)
         self._wakeup_waiter()
-        print("%r resumes reading", self)
+        self.log("resumes reading")
 
     def feed_data_when_ready(self):
         """
@@ -260,33 +281,27 @@ class StreamSock:
             if data:
                 self._read_buffer.extend(data)
             else:
-                print("%r received EOF", self)
                 self.feed_eof()
-            self.resume_read()
+            self.resume_reading()
 
-    async def wait_for_data(self, force = False):
+    async def wait_for_data(self):
         """
         Wait until feed_data() or feed_eof() is called.
 
         If stream was paused, automatically resume it.
         """
-        # StreamReader uses a future to link the protocol feed_data() method
-        # to a read coroutine. Running two read coroutines at the same time
-        # would have an unexpected behaviour. It would not possible to know
-        # which coroutine would get the next data.
+        # wait to receive data and fill into internal read_buffer, it is control by self.timeout
 
         assert not self._read_eof, '_wait_for_data after EOF'
-        if len(self._read_buffer) <= self._buffer_limit or force:
-            # Waiting for data while paused will make deadlock, so prevent it.
-            # This is essential for readexactly(n) for case when n > self._limit.
-            self.pause_read()
-            await self.wait_stream_ready()
+        # Waiting for data while paused will make deadlock, so prevent it.
+        # This is essential for readexactly(n) for case when n > self._limit.
+        await self.pause_reading()
 
     # endregion
 
     # region <write-only>
 
-    def pause_write(self):
+    async def pause_writing(self):
         """
         Called when the transport's buffer goes over the high-water mark.
 
@@ -311,7 +326,9 @@ class StreamSock:
         assert not self._write_pause
         self._write_pause = True
         self._loop.add_writer(self, self.write_data_when_ready)
-        print("%r pauses writing", self)
+        self.log("pauses writing")
+        await self.wait_stream_ready()
+        self.log("pause writing finished")
 
     def resume_write(self):
         """Called when the transport's buffer drains below the low-water mark.
@@ -322,12 +339,11 @@ class StreamSock:
         assert self._write_pause
         self._write_pause = False
         self._loop.remove_writer(self)
-        print("%r resumes writing", self)
+        self.log("resumes writing")
         self._wakeup_waiter()
 
     def write_data_when_ready(self):
         assert self._write_buffer, 'Data should not be empty'
-
         try:
             n = self._sock.send(self._write_buffer)
         except (BlockingIOError, InterruptedError):
@@ -337,10 +353,13 @@ class StreamSock:
         else:
             if n:
                 del self._write_buffer[:n]
-            if self.get_write_buffer_size() <= self._low_water:  # now can write more
-                self.resume_write()  # wake up the waiter, usually is self.drain
+            # now can write more, need to be <=, because if zero is set to low water,
+            # this won call resume write while the write buffer is already empty
+            if self.get_write_buffer_size() <= self._low_water:
+                self.resume_write()  # wake up the waiter, which is usually self.drain who waited for
                 if self._write_eof and not self._write_buffer:
                     self._sock.shutdown(socket.SHUT_WR)
+                    self.log("sent EOF OK")
 
     async def drain(self):
         """
@@ -354,8 +373,7 @@ class StreamSock:
         # drain until lower than low water when current write buffer exceed high water
         # if EOF was written wait to drain all
         while self.get_write_buffer_size() > self._high_water:
-            self.pause_write()
-            await self.wait_stream_ready()
+            await self.pause_writing()
 
     # endregion
 
@@ -407,38 +425,82 @@ class StreamSock:
 
     # region <StreamReader>
 
-    async def readline(self, limit = None):
+    async def readline(self, limit = None, separator = b'\n'):
         """
+        Read chunk of data from the stream until newline (b'\n') or custom separator is found.
+        On success, complete line including newline(separator) will be returned and will be removed from internal buffer.
+
         Limit sets the maximal length of data that can be returned, not counting the newline.
 
-        Read chunk of data from the stream until newline (b'\n') is found or reach the limit or EOF.
-
-        On success, complete line including newline will be returned and will be removed
-        from internal buffer. if reach EOF or limit return current read bytes (whole read_buffer or limit bytes)
+        if reach EOF before found the newline will raise EOFError
+        if limit reached before find newline will raise OverflowError
         """
-        separator = b'\n'
         seplen = len(separator)
         if not limit:
             limit = self._buffer_limit
 
-        """
-            `offset` is the number of bytes from the beginning of the buffer
-            where there is no occurrence of `separator`.
-        """
-        block = await self.read(limit)
-        isep = block.find(block) # isep wont be larger than limit
-        # `newline` not in the buffer. `isep` will be used later to retrieve the data.
-        if isep < 0 or self._read_eof:
-            isep = len(block) - 1
+        # Consume whole buffer except last bytes, which length is
+        # one less than seplen. Let's check corner cases with
+        # separator='SEPARATOR':
+        # * we have received almost complete separator (without last
+        #   byte). i.e buffer='some textSEPARATO'. In this case we
+        #   can safely consume len(separator) - 1 bytes.
+        # * last byte of buffer is first byte of separator, i.e.
+        #   buffer='abcdefghijklmnopqrS'. We may safely consume
+        #   everything except that last byte, but this require to
+        #   analyze bytes of buffer that match partial separator.
+        #   This is slow and/or require FSM. For this case our
+        #   implementation is not optimal, since require rescanning
+        #   of data that is known to not belong to separator. In
+        #   real world, separator will not be so long to notice
+        #   performance problems. Even when reading MIME-encoded
+        #   messages :)
 
-        chunk = block[:isep + seplen]
-        self._read_buffer = block[isep + seplen:] + self._read_buffer
+        # `offset` is the number of bytes from the beginning of the buffer
+        # where there is no occurrence of `separator`.
+        offset = 0
+
+        # Loop until we find `separator` in the buffer, exceed the buffer size,
+        # or an EOF has happened.
+        while True:
+            buflen = len(self._read_buffer)
+
+            # Check if we now have enough data in the buffer for `separator` to
+            # fit.
+            if buflen - offset >= seplen:
+                isep = self._read_buffer.find(separator, offset)
+
+                if isep != -1:
+                    # `separator` is in the buffer. `isep` will be used later
+                    # to retrieve the data.
+                    break
+
+                # see upper comment for explanation.
+                offset = buflen + 1 - seplen
+                if offset > limit:
+                    raise OverflowError
+
+            # Complete message (with full separator) may be present in buffer
+            # even when EOF flag is set. This may happen when the last chunk
+            # adds data which makes separator be found. That's why we check for
+            # EOF *ater* inspecting the buffer.
+            if self._read_eof:
+                raise EOFError
+
+            # _wait_for_data() will resume reading if stream was paused.
+            await self.wait_for_data()
+
+        if isep > limit:
+            raise OverflowError
+
+        chunk = self._read_buffer[:isep + seplen]
+        del self._read_buffer[:isep + seplen]
         return bytes(chunk)
 
     async def read(self, n = -1):
         """
         Read up to `n` bytes from the stream.
-        If n is not provided, or set to -1, read until EOF and return all read bytes.
+        If n is not provided, or set to negative number, read until EOF and return all read bytes.
         If n is zero, return empty bytes object immediately.
         If n is positive, this function try to read `n` bytes, and may return
         less or equal bytes than requested, but at least one byte. If the EOF was received before reach n bytes, then return until EOF
@@ -450,17 +512,15 @@ class StreamSock:
 
         if n < 0:
             # wait to receive EOF
-            blocks = []
             while not self._read_eof:
-                await self.wait_for_data(True)
+                await self.wait_for_data()
 
         while len(self._read_buffer) < n and not self._read_eof:
-            await self.wait_for_data(True)
+            await self.wait_for_data()
 
         # This will work right even if buffer is less than n bytes
         data = bytes(self._read_buffer[:n])
         del self._read_buffer[:n]
-        await self.wait_for_data()  # fetch data if need
         return data
 
     # endregion

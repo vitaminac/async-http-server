@@ -16,7 +16,7 @@ def hello(*args, **kwargs):
 
 @app.route("/static/file")
 def file_provide_test(*args, **kwargs):
-    return app.send_static_file("testFile.htm")
+    return app.send_static_file("./static/testFile.htm")
 
 
 serve(app, host=Config.host, port=Config.port)
