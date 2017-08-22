@@ -3,15 +3,13 @@ from config import Config
 from qsonac.application import Application
 from qsonac.asynchttpserver import serve
 
-import json
-
 app = Application()
 
 
 @app.route("/")
 def hello(*args, **kwargs):
     request = kwargs.pop("request")
-    return json.dumps(request.headers)
+    return str(request.headers)
 
 
 @app.route("/static/file")

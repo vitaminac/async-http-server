@@ -240,7 +240,8 @@ def makeWSGIhandler(wsgi_app):
                 await self.write_itr(Response(code, message))
 
         async def parse_headers(self, fp):
-            """Parses only RFC2822 headers from a file pointer.
+            """
+            Parses only RFC2822 headers from a file pointer.
 
             email Parser wants to see strings rather than bytes.
             But a TextIOWrapper around self.rfile would buffer too many bytes
@@ -250,8 +251,7 @@ def makeWSGIhandler(wsgi_app):
 
             """
             headers = []
-            for i in range(self.Max_Headers):
-                line = await fp.readline(self.Max_Bytes_Per_Line_Field)
+            async for line in self.request:
                 line = line.decode(self.http_head_encoding)
                 headers.append(line)
                 if line in ('\r\n', '\n', ''):
