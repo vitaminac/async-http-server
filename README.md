@@ -1,3 +1,3 @@
-# A asynchronous microframework of a python web server
+# An asynchronous server-side micro-webframework written in python
 
-inspired by Flask and Werkzeug, many comments are just copied from PEP
+inspired by Flask and Werkzeug, you can find that some comments are just copied from Python PEP
